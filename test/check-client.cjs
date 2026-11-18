@@ -16,6 +16,8 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 
 const CLIENT = path.join(__dirname, '..', 'client.js');
+/** Манифест пакета: имя оттуда обязан повторить id клиентского модуля. */
+const PACKAGE = require(path.join(__dirname, '..', 'package.json'));
 
 /** Заглушка хранилища в памяти. */
 function createStorage() {
@@ -283,11 +285,34 @@ function createConfigForms({ flags, status, writable, refuseFirstMutate = false,
 }
 
 /** Собрать песочницу с плагином и вернуть наблюдаемые объекты. */
-function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailable = true, handle = null, handles = null, columns = null, frame = null, seat = null, rejectCode = null, flags = { zoom: true, contextMenu: true }, configFormsAvailable = true, configStatus = 'ready', writable = true, refuseFirstMutate = false, refuseAllMutate = false, sessionId = null, runningSessions = null, reducedMotion = false, locationSearch = '', speech = null, legacySpeech = null, lightPrefs = null, fixedNow = null, boot = null } = {}) {
+function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailable = true, handle = null, handles = null, columns = null, frame = null, seat = null, rejectCode = null, flags = { zoom: true, contextMenu: true }, configFormsAvailable = true, configStatus = 'ready', writable = true, refuseFirstMutate = false, refuseAllMutate = false, sessionId = null, runningSessions = null, reducedMotion = false, locationSearch = '', speech = null, legacySpeech = null, lightPrefs = null, fixedNow = null, boot = null, updateStatus = null, updateCheck = null, updateAfter = null, updateOffline = false } = {}) {
   const storage = createStorage();
   if (stored !== null) storage.setItem('dsh.ui-zoom.v1', stored);
   // Настройки светофора живут в браузере: тест задаёт их так же, как пользователь.
   if (lightPrefs !== null) storage.setItem('dsh.ui-light.settings.v1', JSON.stringify(lightPrefs));
+  /**
+   * Роуты обновления: по умолчанию их нет (старая сборка хоста отвечает 404),
+   * поэтому блок «Обновление» в форме не рисуется, а тесты включают его сами.
+   * `updateAfter` — ответ статуса уже после успешной проверки.
+   */
+  const updateCalls = [];
+  let checkedOnce = false;
+  const updateFetch = (route, init = {}) => {
+    const method = String(init.method ?? 'GET').toUpperCase();
+    updateCalls.push({ route, method });
+    if (updateOffline === true) return Promise.reject(new Error('offline'));
+    let answer;
+    if (method === 'POST') {
+      checkedOnce = true;
+      answer = updateCheck ?? updateAfter ?? updateStatus;
+    } else {
+      answer = checkedOnce && updateAfter !== null ? updateAfter : updateStatus;
+    }
+    if (answer === null || answer === undefined) {
+      return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(answer) });
+  };
   /** Полоска изменения ширины панели: по ней плагин находит рамку интерфейса. */
   let frameHandle = handle;
   /** Все полоски: плагин ставит их по границам колонок. */
@@ -457,6 +482,8 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
     PointerEvent: FakePointerEvent,
     getSelection: () => selectionText,
     __ModuleLoader__: { load: (definition) => { loaded = definition; } },
+    // Роуты обновления: заглушка отвечает как хост-половина пакета.
+    fetch: updateFetch,
     setTimeout: (fn, ms) => {
       const id = ++timerSeq;
       timers.set(id, { fn, ms });
@@ -607,6 +634,7 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
       }
     },
     AbortSignal: {},
+    fetch: updateFetch,
     getComputedStyle,
     console,
     setTimeout: windowObject.setTimeout,
@@ -631,7 +659,10 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
   vm.runInContext(fs.readFileSync(CLIENT, 'utf8'), sandbox, { filename: CLIENT });
 
   assert.ok(loaded, 'client.js должен вызвать window.__ModuleLoader__.load');
-  assert.equal(loaded.id, 'dsh-tweaks', 'id клиентского модуля');
+  // Id клиентского модуля обязан совпадать с `name` из package.json: каркас
+  // ищет клиентскую половину по нему, и после переименования пакета клиент
+  // молча не запускался вовсе (id оставался `dsh-tweaks`).
+  assert.equal(loaded.id, PACKAGE.name, 'id клиентского модуля равен name из package.json');
   const plugin = loaded.factory(sandbox.require);
   // Прототип события общий на весь файл: снимаем патч прошлого прогона, иначе
   // геттер остаётся привязанным к store предыдущей песочницы.
@@ -668,6 +699,8 @@ function loadPlugin({ stored = null, shortcutsAvailable = true, servicesAvailabl
     formsCalls: () => configForms.calls,
     /** Id, по которым каркас спросил форму у службы конфигурации. */
     formsIds: () => configForms.ids,
+    /** Запросы блока «Обновление» к роутам `/volna-tweaks/update/*`. */
+    updateCalls: () => updateCalls,
     /** Сколько подписок на снимок конфигурации держит каркас. */
     formsSubscribers: () => configForms.subscribers(),
     /**
@@ -2941,6 +2974,365 @@ check('(д) ключи спецсигнала есть в обоих слова�
       assert.ok(String(dict[key] ?? '').length > 0, `${locale}: есть ключ ${key}`);
     }
   }
+});
+
+/**
+ * Убрать комментарии: проверки «нет зашитого русского» смотрят только на код,
+ * а не на пояснения к нему.
+ * @param {string} source - исходник или его кусок.
+ * @returns {string} текст без комментариев.
+ */
+function stripComments(source) {
+  return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+}
+
+/**
+ * Отрисовать форму флагов так, как её рисует страница пакета.
+ * @param {object} env - песочница плагина.
+ * @param {Function} [copy] - переводчик подписи (по умолчанию — сам ключ).
+ * @returns {object} узел формы.
+ */
+function formTree(env, copy = (key) => key) {
+  const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
+  assert.ok(entry, 'форма флагов зарегистрирована в слоте plugins.bundle.config');
+  return entry.entry.component({ ...entry.entry.options.inject(), view: 'page', t: copy, translate: copy });
+}
+
+/**
+ * Элемент блока «Обновление»: компонент, а не готовое дерево — его и рисует слот.
+ * @param {object} env - песочница плагина.
+ * @param {Function} [copy] - переводчик подписи.
+ * @returns {object} элемент компонента блока.
+ */
+function updateBlockOf(env, copy) {
+  const block = formTree(env, copy).children.find((child) => child?.props?.key === 'update');
+  assert.ok(block, 'блок «Обновление» есть в форме твиков');
+  assert.equal(typeof block.type, 'function', 'блок — компонент, а не готовая разметка');
+  return block;
+}
+
+/**
+ * Отрисовать блок «Обновление» с курсором хуков: состояние живёт между рендерами.
+ * @param {object} env - песочница плагина.
+ * @param {object} block - элемент блока.
+ * @returns {object | null} дерево блока либо null (данных ещё нет).
+ */
+function renderUpdate(env, block) {
+  return env.hooks('update-block', () => block.type(block.props));
+}
+
+/**
+ * Строки блока «Обновление»: имя строки → её текст.
+ * @param {object | null} tree - дерево блока.
+ * @returns {object} карта строк.
+ */
+function updateLines(tree) {
+  const lines = {};
+  for (const child of tree?.children ?? []) {
+    const name = child?.props?.['data-update-line'];
+    if (name === undefined) continue;
+    lines[name] = String((child.children ?? [])[0] ?? '');
+  }
+  return lines;
+}
+
+/**
+ * Переводчик формы по русскому словарю — без подстановок: шаблон `{{…}}`
+ * подставляет сам компонент, поэтому ожидание собирается через `ruText`.
+ * @param {object} env - песочница плагина.
+ * @returns {Function} перевод по ключу.
+ */
+function formCopy(env) {
+  const dict = env.dictionaries.find((row) => row.locale === 'ru')?.dict ?? {};
+  return (key) => String(dict[key] ?? key);
+}
+
+/** Статус обновления с ответом хоста: тесты меняют только нужные поля. */
+function updateStatusOf(overrides = {}) {
+  return {
+    ok: true,
+    installed: '4.2.0',
+    upstream: '4.2.0',
+    checkedAt: '2026-11-18T06:00:00.000Z',
+    updatedAt: null,
+    restartNeeded: false,
+    state: 'actual',
+    reason: null,
+    intervalHours: 6,
+    autoUpdate: true,
+    ...overrides,
+  };
+}
+
+check('id клиентского модуля равен name из package.json', () => {
+  // Имя пакета меняли, а id модуля остался строкой `dsh-tweaks` — клиентская
+  // половина молча не запускалась вовсе. Сторож сравнивает источник с манифестом.
+  const source = fs.readFileSync(CLIENT, 'utf8');
+  const match = /__ModuleLoader__\.load\(\{\s*id:\s*'([^']+)'/.exec(source);
+  assert.ok(match, 'client.js объявляет id модуля при загрузке');
+  assert.equal(match[1], PACKAGE.name, 'id в client.js совпадает с name из package.json');
+  assert.ok(PACKAGE.version.length > 0, 'версия пакета объявлена');
+});
+
+check('строки блока «Обновление» есть в обоих словарях', () => {
+  const env = loadPlugin();
+  const keys = [
+    'tweak.autoUpdate',
+    'version.autoUpdate',
+    'update.title',
+    'update.installed',
+    'update.upstream',
+    'update.checked',
+    'update.check',
+    'update.checking',
+    'update.failed',
+    'update.restartNeeded',
+    'update.error',
+    'update.nextTry',
+    'update.reason.dirty',
+    'update.reason.noGit',
+    'update.reason.noUpstream',
+    'update.reason.ahead',
+    'update.reason.behind',
+    'update.reason.same',
+    'update.reason.offline',
+    'update.reason.failed',
+    'update.reason.other',
+    'update.caption',
+    'update.captionManual',
+    'update.downloaded',
+  ];
+  for (const locale of ['en', 'ru']) {
+    const dict = env.dictionaries.find((row) => row.locale === locale)?.dict ?? {};
+    for (const key of keys) {
+      assert.ok(String(dict[key] ?? '').length > 0, `${locale}: есть ключ ${key}`);
+    }
+    assert.match(dict['update.caption'], /\{\{hours\}\}/, `${locale}: интервал проверки — подстановка`);
+    assert.match(dict['update.restartNeeded'], /\{\{version\}\}/, `${locale}: версия в строке перезапуска`);
+  }
+  // Подписи различаются: en-словарь не копия русского (иначе перевод не работает).
+  const ru = env.dictionaries.find((row) => row.locale === 'ru')?.dict ?? {};
+  const en = env.dictionaries.find((row) => row.locale === 'en')?.dict ?? {};
+  assert.notEqual(ru['update.title'], en['update.title'], 'заголовок блока переведён');
+});
+
+check('в новых строках формы нет зашитого русского текста', () => {
+  const source = fs.readFileSync(CLIENT, 'utf8');
+  const region = /\/\* #region tweak-update \*\/([\s\S]*?)\/\* #endregion tweak-update \*\//.exec(source);
+  assert.ok(region, 'регион tweak-update объявлен');
+  assert.match(region[1], /UpdateBlock/, 'регион содержит блок обновления');
+  assert.doesNotMatch(
+    stripComments(region[1]),
+    /[А-Яа-яЁё]/,
+    'в регионе tweak-update текст берётся из словаря, русского литерала нет',
+  );
+  // Галочка autoUpdate живёт в самой форме: её код тоже обязан брать текст из словаря.
+  const body = source.slice(source.indexOf('function TweaksForm'), source.indexOf('const SETTINGS_BUTTON_STYLE'));
+  assert.ok(body.includes('tweak.autoUpdate'), 'строка autoUpdate размечена в форме');
+  assert.doesNotMatch(stripComments(body), /[А-Яа-яЁё]/, 'в коде формы нет русского литерала');
+});
+
+checkAsync('галочка autoUpdate пишет поле конфигурации и твик не включает', async () => {
+  const env = loadPlugin({ flags: { zoom: true, contextMenu: true } });
+  const form = formTree(env);
+  const row = form.children.find((child) => child?.props?.['data-config-field'] === 'autoUpdate');
+  assert.ok(row, 'галочка «обновлять автоматически» есть в форме');
+  assert.deepEqual(plain(env.formsIds()), ['zoom'], 'autoUpdate — поле той же записи patch, отдельный контроллер не нужен');
+  const toggle = row.children[1];
+  assert.equal(toggle.props.checked, true, 'по умолчанию обновление включено');
+  assert.equal(toggle.props.disabled, false, 'запись разрешена');
+  const before = readyTweaks(env);
+  toggle.props.onChange(false);
+  await Promise.resolve();
+  await Promise.resolve();
+  const call = env.formsCalls().at(-1);
+  assert.deepEqual(plain(call.ops), [{ op: 'set', path: ['autoUpdate'], value: false }], 'операция set по полю autoUpdate');
+  assert.equal(typeof call.expectedRevision, 'number', 'ревизия прочитана из снимка');
+  assert.deepEqual(readyTweaks(env), before, 'галочка не включает и не выключает ни один твик');
+});
+
+checkAsync('блок «Обновление» показывает версии, время проверки и кнопку', async () => {
+  const env = loadPlugin({ updateStatus: updateStatusOf() });
+  const ru = formCopy(env);
+  const block = updateBlockOf(env, ru);
+  assert.equal(renderUpdate(env, block), null, 'пока ответа нет, блок не рисуется');
+  await settle();
+  await settle();
+  const tree = renderUpdate(env, block);
+  assert.ok(tree, 'ответ пришёл — блок на месте');
+  assert.equal(tree.props['data-update-block'], '', 'у блока свой маркер');
+  const lines = updateLines(tree);
+  assert.equal(lines.installed, ruText(env, 'update.installed', { version: '4.2.0' }), 'установленная версия');
+  assert.equal(lines.upstream, ruText(env, 'update.upstream', { version: '4.2.0' }), 'версия на GitHub');
+  assert.match(lines.checked, /^Проверено: 18\.11(\.\d{4})?, 09:00$/u, 'время проверки — местное и по-человечески');
+  assert.equal(lines.restart, undefined, 'перезапуск не просят: обновления не было');
+  const button = tree.children.find((child) => child?.props?.['data-update-check'] !== undefined);
+  assert.ok(button, 'кнопка «Проверить сейчас» нарисована');
+  assert.equal(button.children[0], ru('update.check'), 'подпись кнопки из словаря');
+  assert.equal(button.props.disabled, false, 'кнопка доступна');
+  const caption = tree.children.find((child) => child?.props?.['data-update-caption'] !== undefined);
+  assert.ok(caption, 'мелкая подпись про расписание есть');
+  assert.equal(caption.children[0], ruText(env, 'update.caption', { hours: '6' }), 'подпись объясняет fast-forward и интервал');
+  assert.equal(env.updateCalls().at(-1).route, '/volna-tweaks/update/status', 'статус читается с GET-роута');
+});
+
+checkAsync('блок «Обновление»: после скачивания ждёт перезапуска', async () => {
+  const env = loadPlugin({
+    updateStatus: updateStatusOf({ installed: '4.3.1', upstream: '4.3.1', updatedAt: '2026-11-18T06:00:05.000Z', restartNeeded: true }),
+  });
+  const ru = formCopy(env);
+  const block = updateBlockOf(env, ru);
+  renderUpdate(env, block);
+  await settle();
+  await settle();
+  const lines = updateLines(renderUpdate(env, block));
+  const restart = ruText(env, 'update.restartNeeded', { version: '4.3.1' });
+  assert.ok(lines.restart.startsWith(`${restart} · `), 'заметная строка про перезапуск HARNESS');
+  // `updatedAt` из контракта читается: рядом видно, когда обновление скачано.
+  const downloaded = ruText(env, 'update.downloaded', { time: '' }).trim();
+  assert.match(lines.restart, new RegExp(`${downloaded} 18\\.11(\\.\\d{4})?, 09:00$`, 'u'), 'в строке перезапуска — время скачивания');
+});
+
+checkAsync('блок «Обновление»: строка перезапуска называет скачанную версию, а не работающую', async () => {
+  // Реальная цепочка: в процессе работает 1.0.0, на диске уже 2.0.0.
+  // Раньше форма подставляла `installed` и обещала «Обновлено до 1.0.0».
+  {
+    const env = loadPlugin({
+      updateStatus: updateStatusOf({ installed: '1.0.0', upstream: '2.0.0', restartNeeded: true, state: 'updated' }),
+    });
+    const block = updateBlockOf(env, formCopy(env));
+    renderUpdate(env, block);
+    await settle();
+    await settle();
+    const lines = updateLines(renderUpdate(env, block));
+    const restart = ruText(env, 'update.restartNeeded', { version: '2.0.0' });
+    assert.ok(lines.restart.startsWith(restart), `в строке перезапуска скачанная версия (${lines.restart})`);
+    assert.match(lines.restart, /2\.0\.0/u, '2.0.0 названа');
+    assert.doesNotMatch(lines.restart, /1\.0\.0/u, 'работающая версия в строке перезапуска не упомянута');
+    // Прежние строки на месте: установленная версия честно показана отдельно.
+    assert.equal(lines.installed, ruText(env, 'update.installed', { version: '1.0.0' }), 'установленная версия');
+    assert.equal(lines.upstream, ruText(env, 'update.upstream', { version: '2.0.0' }), 'версия на диске');
+  }
+});
+
+checkAsync('блок «Обновление»: без upstream строка перезапуска откатывается на installed', async () => {
+  for (const upstream of [null, '']) {
+    const env = loadPlugin({
+      updateStatus: updateStatusOf({ installed: '1.0.0', upstream, restartNeeded: true, state: 'updated' }),
+    });
+    const block = updateBlockOf(env, formCopy(env));
+    renderUpdate(env, block);
+    await settle();
+    await settle();
+    const lines = updateLines(renderUpdate(env, block));
+    const restart = ruText(env, 'update.restartNeeded', { version: '1.0.0' });
+    assert.ok(lines.restart.startsWith(restart), `upstream=${String(upstream)}: откат на installed (${lines.restart})`);
+    assert.equal(lines.upstream, undefined, `upstream=${String(upstream)}: пустой upstream не рисуется`);
+  }
+});
+
+checkAsync('блок «Обновление»: пропуск объясняется по-человечески', async () => {
+  const env = loadPlugin({ updateStatus: updateStatusOf({ state: 'skipped', reason: 'dirty' }) });
+  const ru = formCopy(env);
+  const block = updateBlockOf(env, ru);
+  renderUpdate(env, block);
+  await settle();
+  await settle();
+  const lines = updateLines(renderUpdate(env, block));
+  assert.equal(lines.skipped, ru('update.reason.dirty'), 'причина пропуска — фраза словаря');
+  assert.doesNotMatch(lines.skipped, /dirty/i, 'кода причины в тексте нет');
+  // Незнакомый код не показывается пользователю как есть.
+  const other = loadPlugin({ updateStatus: updateStatusOf({ state: 'skipped', reason: 'worktree-locked' }) });
+  const otherBlock = updateBlockOf(other, formCopy(other));
+  renderUpdate(other, otherBlock);
+  await settle();
+  await settle();
+  assert.equal(updateLines(renderUpdate(other, otherBlock)).skipped, ruText(other, 'update.reason.other'), 'незнакомый код — общая фраза');
+});
+
+checkAsync('блок «Обновление»: ошибка проверки называет время следующей попытки', async () => {
+  const env = loadPlugin({ updateStatus: updateStatusOf({ state: 'error', upstream: null, reason: 'offline' }) });
+  const ru = formCopy(env);
+  const block = updateBlockOf(env, ru);
+  renderUpdate(env, block);
+  await settle();
+  await settle();
+  const lines = updateLines(renderUpdate(env, block));
+  assert.equal(lines.error, ru('update.error'), 'ошибка без техножаргона');
+  assert.ok(lines.next, 'время следующей попытки есть');
+  assert.ok(lines.next.startsWith('Следующая попытка: '), `строка о повторе (${lines.next})`);
+  assert.match(lines.next, /18\.11(\.\d{4})?, 15:00$/u, 'следующая попытка — через интервал в 6 ч');
+  // Автопроверка выключена — срок следующей попытки не обещаем.
+  const manual = loadPlugin({ updateStatus: updateStatusOf({ state: 'error', autoUpdate: false }) });
+  const manualBlock = updateBlockOf(manual, formCopy(manual));
+  renderUpdate(manual, manualBlock);
+  await settle();
+  await settle();
+  assert.equal(updateLines(renderUpdate(manual, manualBlock)).next, undefined, 'без автопроверки срока нет');
+  // Подпись честная: автоповтора нет, кнопка делает разовую проверку.
+  const manualCaption = renderUpdate(manual, manualBlock).children.find((child) => child?.props?.['data-update-caption'] !== undefined);
+  assert.equal(manualCaption.children[0], ruText(manual, 'update.captionManual'), 'подпись говорит, что автоповтор выключен');
+});
+
+checkAsync('кнопка «Проверить сейчас» ходит на POST и перечитывает статус', async () => {
+  const after = updateStatusOf({ installed: '4.4.0', upstream: '4.4.0', restartNeeded: true });
+  const env = loadPlugin({
+    updateStatus: updateStatusOf({ upstream: '4.1.0' }),
+    updateCheck: after,
+    updateAfter: after,
+  });
+  const ru = formCopy(env);
+  const block = updateBlockOf(env, ru);
+  renderUpdate(env, block);
+  await settle();
+  await settle();
+  const before = renderUpdate(env, block);
+  assert.equal(updateLines(before).installed, ruText(env, 'update.installed', { version: '4.2.0' }), 'до проверки — прежняя версия');
+  const button = before.children.find((child) => child?.props?.['data-update-check'] !== undefined);
+  button.props.onClick();
+  const busy = renderUpdate(env, block);
+  const busyButton = busy.children.find((child) => child?.props?.['data-update-check'] !== undefined);
+  assert.equal(busyButton.children[0], ru('update.checking'), 'во время проверки кнопка называет состояние');
+  assert.equal(busyButton.props.disabled, true, 'и не нажимается второй раз');
+  for (let pass = 0; pass < 6; pass += 1) await settle();
+  const lines = updateLines(renderUpdate(env, block));
+  assert.equal(lines.installed, ruText(env, 'update.installed', { version: '4.4.0' }), 'после проверки версия перечитана');
+  assert.ok(lines.restart, 'и появилась строка про перезапуск');
+  const calls = plain(env.updateCalls());
+  const post = calls.findIndex((call) => call.method === 'POST');
+  assert.ok(post >= 0, 'кнопка сходила на POST');
+  assert.equal(calls[post].route, '/volna-tweaks/update/check', 'POST идёт на роут проверки');
+  assert.equal(calls.filter((call) => call.method === 'POST').length, 1, 'одно нажатие — одна проверка');
+  assert.ok(
+    calls.slice(post + 1).some((call) => call.method === 'GET' && call.route === '/volna-tweaks/update/status'),
+    'после проверки статус перечитан тем же GET-роутом',
+  );
+});
+
+checkAsync('недоступный роут обновления не рисует блок и молчит в консоли', async () => {
+  // Старый хост: роутов `/volna-tweaks/update/*` ещё нет — 404.
+  const legacy = loadPlugin();
+  const legacyBlock = updateBlockOf(legacy);
+  renderUpdate(legacy, legacyBlock);
+  await settle();
+  await settle();
+  assert.equal(renderUpdate(legacy, legacyBlock), null, 'роутов нет — блока нет');
+
+  // Сети нет: запрос падает обещанием, а не исключением в рендере.
+  const errors = [];
+  const realError = console.error;
+  console.error = (...args) => errors.push(args);
+  try {
+    const offline = loadPlugin({ updateOffline: true });
+    const block = updateBlockOf(offline);
+    renderUpdate(offline, block);
+    await settle();
+    await settle();
+    assert.equal(renderUpdate(offline, block), null, 'нет связи — блок просто не рисуется');
+  } finally {
+    console.error = realError;
+  }
+  assert.deepEqual(errors, [], 'в консоль ничего не падает');
 });
 
 // Асинхронные проверки идут после обычных: их список собирается по ходу файла.

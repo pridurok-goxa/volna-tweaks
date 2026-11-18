@@ -12,7 +12,7 @@
  * безопасно. Твик «масштаб» работает и один: он не зависит от соседей.
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-tweaks',
+  id: 'volna-tweaks',
   factory(require) {
     const React = require('react');
     // Примитивы — базовый модуль страницы (platform seed): объявлять их отдельно не нужно.
@@ -453,6 +453,30 @@ window.__ModuleLoader__.load({
         'form.readOnly': 'This deployment stores settings read-only.',
         'form.saveFailed': 'The value was not saved. Try again.',
         'form.switchOff': 'All tweaks are off: page opened with ?tweaks=off. Good for checking whether freezes come from our layer; ?tweaks=on turns them back on.',
+        'tweak.autoUpdate': 'Update the plugin automatically',
+        'version.autoUpdate': 'Host setting: background download, the interface does not change.',
+        'update.title': 'Update',
+        'update.installed': 'Installed: {{version}}',
+        'update.upstream': 'On GitHub: {{version}}',
+        'update.checked': 'Checked: {{time}}',
+        'update.check': 'Check now',
+        'update.checking': 'Checking…',
+        'update.failed': 'Could not check now. Try again.',
+        'update.restartNeeded': 'Updated to {{version}} — restart HARNESS',
+        'update.error': 'Could not check; will try again later',
+        'update.nextTry': 'Next attempt: {{time}}',
+        'update.reason.dirty': 'Local edits in the plugin folder — the check was skipped, your changes are untouched',
+        'update.reason.noGit': 'The plugin folder is not a git clone — there is nothing to update from',
+        'update.reason.ahead': 'Your copy is ahead of GitHub — there is nothing to download',
+        'update.reason.behind': 'GitHub has newer commits — they are being downloaded',
+        'update.reason.same': 'Your copy matches GitHub',
+        'update.reason.noUpstream': 'No upstream branch to compare with',
+        'update.reason.failed': 'The check did not go through',
+        'update.reason.offline': 'GitHub is unreachable — will try again later',
+        'update.reason.other': 'The check was skipped',
+        'update.caption': 'Checked on start and every {{hours}} h; downloads are fast-forward only, your edits are never touched.',
+        'update.captionManual': 'Automatic checks are off: nothing happens on a timer, and “Check now” runs a one-off check.',
+        'update.downloaded': 'downloaded {{time}}',
       },
       ru: {
         'zoom.in': 'Увеличить размер интерфейса',
@@ -539,6 +563,30 @@ window.__ModuleLoader__.load({
         'form.readOnly': 'Эта сборка хранит настройки только для чтения.',
         'form.saveFailed': 'Значение не сохранилось. Попробуйте ещё раз.',
         'form.switchOff': 'Все твики выключены: страница открыта с ?tweaks=off. Так проверяют, не зависание ли это нашего слоя; ?tweaks=on включает твики обратно.',
+        'tweak.autoUpdate': 'Обновлять плагин автоматически',
+        'version.autoUpdate': 'Настройка хоста: загрузка в фоне, интерфейс не меняется.',
+        'update.title': 'Обновление',
+        'update.installed': 'Установлено: {{version}}',
+        'update.upstream': 'На GitHub: {{version}}',
+        'update.checked': 'Проверено: {{time}}',
+        'update.check': 'Проверить сейчас',
+        'update.checking': 'Проверяю…',
+        'update.failed': 'Не удалось проверить сейчас. Попробуйте ещё раз.',
+        'update.restartNeeded': 'Обновлено до {{version}} — перезапустите HARNESS',
+        'update.error': 'Не удалось проверить, попробуем позже',
+        'update.nextTry': 'Следующая попытка: {{time}}',
+        'update.reason.dirty': 'Грязные локальные правки в папке плагина — проверка пропущена, ваши правки не тронуты',
+        'update.reason.noGit': 'Папка плагина не git-клон — обновляться не из чего',
+        'update.reason.ahead': 'Ваша копия впереди GitHub — скачивать нечего',
+        'update.reason.behind': 'На GitHub есть новые коммиты — они скачиваются',
+        'update.reason.same': 'Ваша копия совпадает с GitHub',
+        'update.reason.noUpstream': 'Не настроена ветка для сравнения',
+        'update.reason.failed': 'Проверка не удалась',
+        'update.reason.offline': 'GitHub недоступен — попробуем позже',
+        'update.reason.other': 'Проверка пропущена',
+        'update.caption': 'Проверка при старте и раз в {{hours}} ч; скачивание только fast-forward, ваши правки не затрагиваются.',
+        'update.captionManual': 'Автоповтор выключен: по таймеру ничего не происходит, «Проверить сейчас» делает разовую проверку.',
+        'update.downloaded': 'скачано {{time}}',
       },
     };
 
@@ -8315,6 +8363,282 @@ window.__ModuleLoader__.load({
     };
     const FORM_NOTICE_STYLE = { margin: '0', color: 'var(--dsw-alias-label-secondary)' };
 
+    /* #region tweak-update */
+    /** Роут статуса обновления: его поднимает хост-половина пакета. */
+    const UPDATE_STATUS_ROUTE = '/volna-tweaks/update/status';
+    /** Роут немедленной проверки: POST, в ответе тот же статус. */
+    const UPDATE_CHECK_ROUTE = '/volna-tweaks/update/check';
+    /** Сколько ждём ответа роута, прежде чем считать, что связи нет. */
+    const UPDATE_TIMEOUT_MS = 8000;
+    /** Интервал автоматической проверки, если хост своего не прислал. */
+    const UPDATE_INTERVAL_HOURS = 6;
+    /**
+     * Причина пропуска проверки: код из статуса → ключ словаря.
+     *
+     * Код в интерфейс не выводится: пользователю нужен смысл, а не имя ветки
+     * проверки. Незнакомый код показывает общую строку, а не «dirty».
+     */
+    const UPDATE_REASONS = {
+      dirty: 'update.reason.dirty',
+      'no-git': 'update.reason.noGit',
+      nogit: 'update.reason.noGit',
+      'no-upstream': 'update.reason.noUpstream',
+      noUpstream: 'update.reason.noUpstream',
+      ahead: 'update.reason.ahead',
+      behind: 'update.reason.behind',
+      same: 'update.reason.same',
+      offline: 'update.reason.offline',
+      network: 'update.reason.offline',
+      failed: 'update.reason.failed',
+    };
+
+    /** Блок «Обновление»: отделён от галочек тонкой линией. */
+    const UPDATE_BLOCK_STYLE = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '6px',
+      paddingTop: '8px',
+      borderTop: '0.5px solid var(--dsw-alias-border-l2)',
+    };
+    const UPDATE_TITLE_STYLE = { font: '600 14px/20px system-ui, sans-serif' };
+    const UPDATE_BUTTON_STYLE = {
+      alignSelf: 'flex-start',
+      height: '30px',
+      padding: '0 12px',
+      border: '0.5px solid var(--dsw-alias-border-l2)',
+      borderRadius: '10px',
+      background: 'var(--dsw-alias-bg-layer-1)',
+      color: 'var(--dsw-alias-label-primary)',
+      font: '500 13px/18px system-ui, sans-serif',
+    };
+    const UPDATE_WARNING_STYLE = {
+      margin: '0',
+      padding: '8px 10px',
+      border: '0.5px solid var(--dsw-alias-state-warning-primary, var(--dsw-alias-border-l2))',
+      borderRadius: '10px',
+      background: 'var(--dsw-alias-bg-layer-1)',
+      color: 'var(--dsw-alias-label-primary)',
+      font: '500 13px/18px system-ui, sans-serif',
+    };
+    const UPDATE_CAPTION_STYLE = {
+      margin: '2px 0 0',
+      color: 'var(--dsw-alias-label-tertiary)',
+      font: '400 12px/16px system-ui, sans-serif',
+    };
+
+    /**
+     * Запрос к роутам обновления: один путь, один таймаут, без исключений.
+     *
+     * Отсутствующий роут (старая версия хоста), ответ не-2xx и оборванная
+     * связь одинаково дают `null`: блок обновления тогда просто не рисуется,
+     * а консоль не шумит — старый хост о новом блоке знать не обязан.
+     * @param {string} route - путь роута.
+     * @param {string} method - HTTP-метод.
+     * @returns {Promise<object | null>} ответ хоста либо null.
+     */
+    async function updateRequest(route, method) {
+      if (typeof fetch !== 'function') return null;
+      let timer = null;
+      try {
+        let signal;
+        if (typeof AbortController === 'function') {
+          const controller = new AbortController();
+          signal = controller.signal;
+          timer = setTimeout(() => controller.abort(), UPDATE_TIMEOUT_MS);
+        }
+        const response = await fetch(route, {
+          method,
+          credentials: 'same-origin',
+          headers: method === 'POST' ? { 'content-type': 'application/json' } : undefined,
+          body: method === 'POST' ? '{}' : undefined,
+          signal,
+        });
+        if (response?.ok !== true) return null;
+        const payload = await response.json();
+        // Конверт ошибки роута (`ok: false`) — не статус: рисуем то же, что и без роута.
+        return payload !== null && typeof payload === 'object' && payload.ok !== false ? payload : null;
+      } catch (_error) {
+        return null;
+      } finally {
+        if (timer !== null && typeof clearTimeout === 'function') clearTimeout(timer);
+      }
+    }
+
+    /**
+     * Отметка времени из ответа хоста: ISO-строка или число миллисекунд.
+     * @param {*} value - значение поля времени.
+     * @returns {number | null} миллисекунды либо null.
+     */
+    function updateTimeMs(value) {
+      if (value === null || value === undefined || value === '') return null;
+      const ms = value instanceof Date ? value.getTime() : new Date(typeof value === 'number' ? value : String(value)).getTime();
+      return Number.isFinite(ms) ? ms : null;
+    }
+
+    /**
+     * Время проверки по-человечески и в местном времени: `18.11, 14:05`.
+     * Год добавляется, только если он не текущий.
+     * @param {*} value - отметка времени: ISO-строка или число миллисекунд.
+     * @returns {string} текст времени либо пустая строка.
+     */
+    function formatUpdateTime(value) {
+      const ms = updateTimeMs(value);
+      if (ms === null) return '';
+      const date = new Date(ms);
+      const pad = (number) => String(number).padStart(2, '0');
+      const day = `${pad(date.getDate())}.${pad(date.getMonth() + 1)}`;
+      const year = date.getFullYear() === new Date().getFullYear() ? '' : `.${date.getFullYear()}`;
+      return `${day}${year}, ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+
+    /**
+     * Версия из ответа хоста: пустое или нестроковое значение — это «неизвестна».
+     * @param {*} value - поле версии.
+     * @returns {string} версия либо пустая строка.
+     */
+    function updateVersion(value) {
+      return typeof value === 'string' && value.trim() !== '' ? value.trim() : '';
+    }
+
+    /**
+     * Интервал автоматической проверки из ответа хоста.
+     * @param {*} value - поле `intervalHours`.
+     * @returns {number} часы, по умолчанию UPDATE_INTERVAL_HOURS.
+     */
+    function updateIntervalHours(value) {
+      const hours = Number(value);
+      return Number.isFinite(hours) && hours > 0 ? hours : UPDATE_INTERVAL_HOURS;
+    }
+
+    /**
+     * Время следующей автоматической попытки: последняя проверка плюс интервал.
+     * @param {object} status - ответ хоста.
+     * @param {number} hours - интервал проверки в часах.
+     * @returns {string} текст времени либо пустая строка.
+     */
+    function updateNextTry(status, hours) {
+      if (status?.autoUpdate === false) return '';
+      const checked = updateTimeMs(status?.checkedAt);
+      // Время проверки неизвестно — обещать срок нечестно: строку не рисуем.
+      return checked === null ? '' : formatUpdateTime(checked + hours * 3600000);
+    }
+
+    /**
+     * Строка блока обновления с маркером: по нему тесты и видно, что показано.
+     * @param {string} key - имя строки.
+     * @param {string} text - текст строки.
+     * @param {object} [style] - стиль строки.
+     * @returns {object} элемент строки.
+     */
+    function updateLine(key, text, style) {
+      return React.createElement('p', { key, style: style ?? FORM_NOTICE_STYLE, 'data-update-line': key }, text);
+    }
+
+    /**
+     * Блок «Обновление» формы твиков: версии, время проверки, кнопка.
+     *
+     * Данные берутся с роутов `/volna-tweaks/update/*` хост-половины. Пока
+     * ответа нет (роут не в этой сборке, сеть недоступна), блок не рисуется
+     * вовсе: в форме остаются только галочки твиков.
+     * @param {object} props - `t` словаря формы.
+     * @returns {object | null} строки блока либо null.
+     */
+    function UpdateBlock(props) {
+      const { t } = props;
+      const [status, setStatus] = React.useState(null);
+      const [busy, setBusy] = React.useState(false);
+      const [failed, setFailed] = React.useState(false);
+      // Форма живёт в шторке и размонтируется: запоздавший ответ молчит.
+      const alive = React.useRef(true);
+      React.useEffect(() => {
+        alive.current = true;
+        updateRequest(UPDATE_STATUS_ROUTE, 'GET').then((payload) => {
+          if (payload !== null && alive.current === true) setStatus(payload);
+        });
+        return () => {
+          alive.current = false;
+        };
+      }, []);
+      const copy = (key) => (typeof t === 'function' ? t(key) : key);
+      if (status === null) return null;
+      /** Кнопка проверки: после успеха статус перечитывается, а не берётся из POST. */
+      const check = () => {
+        if (busy) return;
+        setBusy(true);
+        setFailed(false);
+        updateRequest(UPDATE_CHECK_ROUTE, 'POST').then(async (payload) => {
+          if (payload === null) {
+            setBusy(false);
+            setFailed(true);
+            return;
+          }
+          const fresh = await updateRequest(UPDATE_STATUS_ROUTE, 'GET');
+          setBusy(false);
+          setStatus(fresh ?? payload);
+        });
+      };
+      const state = typeof status.state === 'string' ? status.state : '';
+      const installed = updateVersion(status.installed);
+      const upstream = updateVersion(status.upstream);
+      const checkedAt = formatUpdateTime(status.checkedAt);
+      const hours = updateIntervalHours(status.intervalHours);
+      const lines = [React.createElement('strong', { key: 'title', style: UPDATE_TITLE_STYLE }, copy('update.title'))];
+      if (installed !== '') {
+        lines.push(updateLine('installed', copy('update.installed').replace('{{version}}', installed)));
+      }
+      if (upstream !== '') {
+        lines.push(updateLine('upstream', copy('update.upstream').replace('{{version}}', upstream)));
+      }
+      if (checkedAt !== '') {
+        lines.push(updateLine('checked', copy('update.checked').replace('{{time}}', checkedAt)));
+      }
+      if (status.restartNeeded === true) {
+        // Показываем ту версию, что уже лежит на диске после fast-forward (`upstream`);
+        // `installed` — код, работающий в процессе, и он устарел до перезапуска.
+        const version = upstream !== '' ? upstream : installed;
+        // `updatedAt` — когда обновление уже скачано; тот же форматер, что у `checkedAt`.
+        const downloadedAt = formatUpdateTime(status.updatedAt);
+        const restart = copy('update.restartNeeded').replace('{{version}}', version);
+        const text = downloadedAt === '' ? restart : `${restart} · ${copy('update.downloaded').replace('{{time}}', downloadedAt)}`;
+        lines.push(updateLine('restart', text, UPDATE_WARNING_STYLE));
+      }
+      if (state === 'skipped') {
+        const reason = String(status.reason ?? '').toLowerCase();
+        lines.push(updateLine('skipped', copy(UPDATE_REASONS[reason] ?? 'update.reason.other')));
+      }
+      if (state === 'error') {
+        lines.push(updateLine('error', copy('update.error')));
+        const next = updateNextTry(status, hours);
+        if (next !== '') lines.push(updateLine('next', copy('update.nextTry').replace('{{time}}', next)));
+      }
+      if (failed) lines.push(updateLine('failed', copy('update.failed')));
+      lines.push(
+        React.createElement(
+          'button',
+          {
+            key: 'check',
+            type: 'button',
+            'data-update-check': '',
+            disabled: busy,
+            style: { ...UPDATE_BUTTON_STYLE, cursor: busy ? 'progress' : 'pointer', opacity: busy ? '0.6' : '1' },
+            onClick: check,
+          },
+          busy ? copy('update.checking') : copy('update.check'),
+        ),
+      );
+      // Подпись честная: со снятой галочкой автоповтора нет, остаётся только кнопка.
+      const captionKey = status.autoUpdate === false ? 'update.captionManual' : 'update.caption';
+      lines.push(
+        React.createElement(
+          'p',
+          { key: 'caption', style: UPDATE_CAPTION_STYLE, 'data-update-caption': '' },
+          copy(captionKey).replace('{{hours}}', String(hours)),
+        ),
+      );
+      return React.createElement('div', { style: UPDATE_BLOCK_STYLE, 'data-update-block': '' }, ...lines);
+    }
+    /* #endregion tweak-update */
+
     /**
      * Подписаться на снимок конфигурации твиков.
      *
@@ -8412,6 +8736,45 @@ window.__ModuleLoader__.load({
           rows.push(React.createElement('div', { key: `${id}-detail` }, tweak.renderDetail({ controller, t, translate })));
         }
       }
+      // Галочка «обновлять автоматически» — поле конфигурации без клиентского
+      // твика: она только пишет значение в тот же документ, поэтому её нет в
+      // реестре TWEAKS и маркер у строки свой (`data-config-field`).
+      const autoUpdateLabel = copy('tweak.autoUpdate');
+      rows.push(
+        React.createElement(
+          'div',
+          { key: 'autoUpdate', 'data-config-field': 'autoUpdate', style: FORM_ROW_STYLE },
+          React.createElement(
+            'span',
+            { style: FORM_LABEL_STYLE },
+            React.createElement('span', null, autoUpdateLabel),
+            React.createElement(
+              'span',
+              { style: FORM_VERSION_STYLE, 'data-version-note': 'autoUpdate' },
+              copy('version.autoUpdate'),
+            ),
+          ),
+          React.createElement(Switch, {
+            checked: flagOn({ defaultOn: true }, 'autoUpdate', ready ? snapshot.value : null),
+            label: autoUpdateLabel,
+            disabled: !writable || pending !== '',
+            onChange: (next) => {
+              setFailed(false);
+              setPending('autoUpdate');
+              Promise.resolve(writeFlag(controller, 'autoUpdate', next)).then(
+                (accepted) => {
+                  setPending('');
+                  if (!accepted) setFailed(true);
+                },
+                () => {
+                  setPending('');
+                  setFailed(true);
+                },
+              );
+            },
+          }),
+        ),
+      );
       const coreLabel = copy('form.core').replace('{{version}}', coreVersion());
       const notices = [
         React.createElement('p', { key: 'core', style: FORM_NOTICE_STYLE, 'data-core-version': coreVersion() }, coreLabel),
@@ -8436,7 +8799,10 @@ window.__ModuleLoader__.load({
           React.createElement('p', { key: 'failed', style: FORM_NOTICE_STYLE }, copy('form.saveFailed')),
         );
       }
-      return React.createElement('div', { style: FORM_STYLE }, ...rows, ...notices);
+      // Блок обновления идёт последним: он про пакет целиком, а не про твик.
+      // Пока хост не ответил (старая сборка, нет сети), компонент рисует null.
+      const update = React.createElement(UpdateBlock, { key: 'update', t: copy });
+      return React.createElement('div', { style: FORM_STYLE }, ...rows, ...notices, update);
     }
 
     /** Кнопка «Твики» в подвале мобильной панели. */

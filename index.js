@@ -137,6 +137,10 @@ export const Config = Schema.object({
   agentGuardsRootWriteAllow: Schema.array(Schema.string())
     .default(['docs/plans/', '.cursor/plans/', 'reports/', '.local/', '.wt/', 'INFRA-CHANGES.md'])
     .volatile(),
+  // Автообновление пакета из git: раз в 6 часов хост-часть проверяет апстрим и
+  // делает только fast-forward. Галочки у поля нет — её рисует клиентская
+  // половина у своего твика; фиктивного твика в реестре TWEAKS для этого нет.
+  autoUpdate: Schema.boolean().default(true).volatile(),
 });
 
 /** Модуль хост-части скачивания файлов. */
@@ -153,6 +157,8 @@ const QUEUE_EDIT_HOST = './tweaks/queue-edit-host.js';
 
 /** Модуль хост-части твика «речь»: путь относительно нашего index.js. */
 const WHISPER_HOST = './tweaks/whisper-host.js';
+/** Модуль хост-части автообновления из git. */
+const UPDATER_HOST = './tweaks/updater-host.js';
 /** Размеры модели из схемы Config; всё прочее сводится к размеру по умолчанию. */
 const WHISPER_MODELS = ['tiny', 'base', 'small', 'medium', 'large-v3', 'turbo'];
 const WHISPER_DEFAULT_MODEL = 'medium';
@@ -752,6 +758,72 @@ function attachAgentGuards(ctx, config) {
 }
 
 /**
+ * Подключить хост-часть автообновления из git (autoUpdate).
+ *
+ * Модуль грузится всегда, как у страховки агентов: роуты `/volna-tweaks/update/*`
+ * (кнопка «Проверить сейчас») должны работать и при снятой галочке. Флаг
+ * `autoUpdate` управляет только расписанием — его снимает и ставит `update`
+ * без перезапуска, поэтому выключение не убивает ручную проверку.
+ * Сбой загрузки уходит в лог и не ломает старт хоста: обновление — удобство,
+ * а не условие работы плагина.
+ * @param {object} ctx - хост-контекст плагина.
+ * @param {unknown} config - конфигурация записи (volatile-поля — ссылки).
+ * @returns {void}
+ */
+function attachUpdater(ctx, config) {
+  let host = null;
+  let enabled = false;
+  let queue = Promise.resolve();
+
+  async function ensureHost() {
+    if (host !== null) return host;
+    try {
+      host = await import(UPDATER_HOST);
+      return host;
+    } catch (error) {
+      host = null;
+      warn(ctx, `volna-tweaks: хост-часть автообновления (${UPDATER_HOST}) недоступна`, error);
+      return null;
+    }
+  }
+
+  async function sync() {
+    const plain = flatten(config);
+    const module = await ensureHost();
+    if (module === null || typeof module.activate !== 'function') return;
+    if (!enabled) {
+      try {
+        module.activate(ctx, plain);
+        enabled = true;
+      } catch (error) {
+        warn(ctx, 'volna-tweaks: автообновление не включилось', error);
+        await module.deactivate?.().catch(() => {});
+        enabled = false;
+      }
+      return;
+    }
+    if (typeof module.update === 'function') module.update(plain);
+  }
+
+  function schedule() {
+    queue = queue.then(sync).catch((error) => {
+      warn(ctx, 'volna-tweaks: переключение автообновления прервано', error);
+    });
+  }
+
+  schedule();
+  if (typeof ctx.on === 'function') ctx.on('loader/volatile-update', () => schedule());
+  const dispose = () => {
+    queue = queue
+      .then(() => (enabled ? host?.deactivate?.() : undefined))
+      .catch((error) => warn(ctx, 'volna-tweaks: автообновление не снято при выгрузке', error));
+    return queue;
+  };
+  if (typeof ctx.effect === 'function') ctx.effect(() => dispose);
+  else if (typeof ctx.on === 'function') ctx.on('dispose', dispose);
+}
+
+/**
  * Хост-половина бандла: твики интерфейса живут в браузере, а у твиков «речь»
  * и «светофор» есть хост-части — их поднимает и снимает этот apply по флагам.
  * @param {object} ctx - хост-контекст плагина.
@@ -763,6 +835,7 @@ export function apply(ctx, config) {
   attachTrafficLight(ctx, config);
   attachGoalKeepalive(ctx, config);
   attachAgentGuards(ctx, config);
+  attachUpdater(ctx, config);
   attachQueueEditor(ctx);
   attachDownloads(ctx);
 }

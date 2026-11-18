@@ -16,6 +16,10 @@
  * сохраняет признак в своё volatile-поле схемы и больше выбор не переписывает;
  * падение `configure` и отсутствие службы твик не роняют.
  *
+ * Хост-часть автообновления тоже проверяется здесь: она грузится и при снятой
+ * галочке `autoUpdate` (ручная проверка жива), а расписание снимается.
+ * Файлы состояния пишутся во временный `DSH_HOME`, боевой профиль не трогается.
+ *
  * Запуск: node test/check-host.cjs
  */
 'use strict';
@@ -28,6 +32,18 @@ const { registerHooks } = require('node:module');
 const { pathToFileURL } = require('node:url');
 
 const INDEX = path.join(__dirname, '..', 'index.js');
+
+// Состояние твиков (`update.json`, `update.log`) пишется в `$DSH_HOME`: прогон
+// подменяет его временным каталогом, чтобы не затирать боевые файлы профиля
+// (`C:\Users\goxa\.dsh\dsh-tweaks`). Так же делает check-updater.
+process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-tweaks-host-'));
+process.on('exit', () => {
+  try {
+    fs.rmSync(process.env.DSH_HOME, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  } catch (_error) {
+    /* каталог в %TEMP% уберёт система */
+  }
+});
 
 if (typeof registerHooks !== 'function') {
   // Заглушку схемы иначе не подставить, а без неё index.js не загрузится:
@@ -438,6 +454,24 @@ async function main() {
     assert.equal(noSpeech.registered.length, 0, 'повторное событие не роняет плагин');
   } finally {
     fs.rmSync(noSpeechDir, { recursive: true, force: true });
+  }
+
+  // 15) Автообновление выключено: хост-часть всё равно загружается (кнопка
+  // «Проверить сейчас» жива), а расписание снято — в журнале `auto=off`.
+  const updaterDir = makePackageCopy(null);
+  try {
+    fs.mkdirSync(path.join(updaterDir, 'tweaks'), { recursive: true });
+    fs.copyFileSync(path.join(__dirname, '..', 'tweaks', 'updater-host.js'), path.join(updaterDir, 'tweaks', 'updater-host.js'));
+    const updaterModule = await import(pathToFileURL(path.join(updaterDir, 'index.js')).href);
+    const updaterCtx = createContext({ speechToText: false });
+    updaterModule.apply(updaterCtx, { autoUpdate: false });
+    await settle();
+    const updaterState = path.join(process.env.DSH_HOME, path.basename(updaterDir));
+    const updaterLog = fs.readFileSync(path.join(updaterState, 'update.log'), 'utf8');
+    assert.match(updaterLog, /activate \| .*note=auto=off/, 'хост-часть поднята при выключенном автообновлении');
+    assert.ok(fs.existsSync(path.join(updaterState, 'update.json')), 'кэш статуса записан во временный DSH_HOME');
+  } finally {
+    fs.rmSync(updaterDir, { recursive: true, force: true });
   }
 
   console.log('check-host: ok');

@@ -14,6 +14,8 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 
 const CLIENT = path.join(__dirname, '..', 'client.js');
+/** Манифест пакета: id клиентского модуля обязан совпадать с его `name`. */
+const PACKAGE = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
 
 /** Ключ отметки инициализации: её пишет каркас твиков в хранилище устройства. */
 const READY_KEY = 'dsh.ui-zoom.ready.v1';
@@ -238,7 +240,7 @@ function loadPlugin({ search = '', stored = null, flags = { zoom: true, contextM
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(CLIENT, 'utf8'), sandbox, { filename: CLIENT });
   assert.ok(loaded, 'client.js должен вызвать window.__ModuleLoader__.load');
-  assert.equal(loaded.id, 'dsh-tweaks', 'id клиентского модуля');
+  assert.equal(loaded.id, PACKAGE.name, 'id клиентского модуля совпадает с name из package.json');
   const plugin = loaded.factory(sandbox.require);
   plugin.apply(ctx);
 
