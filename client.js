@@ -11,8 +11,18 @@
  * через `api.own` и снимаются при выключении, поэтому повторное включение
  * безопасно. Твик «масштаб» работает и один: он не зависит от соседей.
  */
+/**
+ * Id клиентского модуля: обязана совпадать с `name` в package.json — по ней DSH
+ * находит клиентский модуль и форму на странице пакета. Слот
+ * `plugins.bundle.config` страница плагинов адресует именно именем пакета
+ * (`renderSlot(..., { entryKey: pkg.name })`, README `dsh-client-ui-plugin-manager`:
+ * «keyed by the bundle's package name»). Пока здесь стояло `dsh-tweaks`, форма
+ * галочек не попадала на страницу пакета `volna-tweaks`: оставалось описание.
+ */
+const PLUGIN_ID = 'volna-tweaks';
+
 window.__ModuleLoader__.load({
-  id: 'volna-tweaks',
+  id: PLUGIN_ID,
   factory(require) {
     const React = require('react');
     // Примитивы — базовый модуль страницы (platform seed): объявлять их отдельно не нужно.
@@ -431,9 +441,9 @@ window.__ModuleLoader__.load({
         'light.pausedHint': 'Work is paused while the light is red',
         'light.setting.dock': 'Bottom indicator',
         'light.setting.dock.lamp': 'Indicator only',
-        'light.setting.dock.time': 'Indicator and time left',
-        'light.setting.dock.timeOnly': 'Indicator and time',
-        'light.setting.dock.label': 'Indicator, time and tariff',
+        'light.setting.dock.time': 'Indicator, status and time left',
+        'light.setting.dock.timeOnly': 'Indicator and time left',
+        'light.setting.dock.label': 'Indicator and current time',
         'light.setting.warning': 'Warning',
         'light.setting.warningValue': '{{minutes}} min before',
         'light.setting.hint': 'These settings live in this browser; each developer keeps their own',
@@ -541,9 +551,9 @@ window.__ModuleLoader__.load({
         'light.pausedHint': 'Работа на паузе, пока горит красный',
         'light.setting.dock': 'Нижний индикатор',
         'light.setting.dock.lamp': 'Только индикатор',
-        'light.setting.dock.time': 'Индикатор и оставшееся время',
-        'light.setting.dock.timeOnly': 'Индикатор и время',
-        'light.setting.dock.label': 'Индикатор, время и тариф',
+        'light.setting.dock.time': 'Индикатор, название и оставшееся время',
+        'light.setting.dock.timeOnly': 'Индикатор и оставшееся время',
+        'light.setting.dock.label': 'Индикатор и текущее время',
         'light.setting.warning': 'Предупреждение',
         'light.setting.warningValue': 'за {{minutes}} мин',
         'light.setting.hint': 'Настройки хранятся в этом браузере: у каждого разработчика свои',
@@ -3000,8 +3010,26 @@ window.__ModuleLoader__.load({
     /** Сколько миллисекунд висит подсказка об отказе записи. */
     const LIGHT_SIGNAL_HINT_MS = 5000;
 
-    /** Режимы нижнего индикатора, по возрастанию подробности. */
+    /**
+     * Режимы нижнего индикатора, по возрастанию подробности: только лампа,
+     * лампа и остаток, лампа с названием статуса и остатком, лампа и часы.
+     */
     const LIGHT_DOCK_MODES = ['lamp', 'time', 'lamp-time', 'lamp-time-label'];
+
+    /** Версия сохранённых настроек: по маркеру видно, что миграция уже прошла. */
+    const LIGHT_PREFS_VERSION = 2;
+
+    /**
+     * Исправление старых значений `dockMode` — ровно один раз на устройство.
+     *
+     * До версии 2 подписи в форме спорили с картинкой: выбранное «Индикатор и
+     * оставшееся время» (`lamp-time`) рисовало текущие часы, а «Индикатор, время
+     * и тариф» (`lamp-time-label`) — название статуса и часы. Человек выбирал
+     * смысл подписи, поэтому старый выбор переводится в режим, который он хотел
+     * видеть. Значения режимов при этом остаются прежними: переименования в
+     * настройке нет, исправляется только сам выбор.
+     */
+    const LIGHT_DOCK_MIGRATION = { 'lamp-time': 'time', 'lamp-time-label': 'lamp-time' };
 
     /** Варианты предупреждения о приближении пика, в минутах. */
     const LIGHT_WARNING_CHOICES = [10, 20, 30];
@@ -3024,7 +3052,14 @@ window.__ModuleLoader__.load({
       }
       const listeners = new Set();
 
-      /** Прочитать сохранённые настройки, отбросив испорченные значения. */
+      /**
+       * Прочитать сохранённые настройки, отбросив испорченные значения.
+       *
+       * Здесь же однократная миграция: у объекта без маркера `v: 2` значение
+       * `dockMode` переводится по `LIGHT_DOCK_MIGRATION`, а результат сразу
+       * пишется обратно уже с маркером — второго исправления не будет.
+       * @returns {object} настройки: только известные поля.
+       */
       function read() {
         try {
           const raw = storage?.getItem(LIGHT_PREFS_KEY);
@@ -3034,6 +3069,18 @@ window.__ModuleLoader__.load({
             if (LIGHT_DOCK_MODES.includes(parsed.dockMode)) prefs.dockMode = parsed.dockMode;
             if (LIGHT_WARNING_CHOICES.includes(parsed.warningMinutes)) {
               prefs.warningMinutes = parsed.warningMinutes;
+            }
+            if (parsed.v !== LIGHT_PREFS_VERSION) {
+              const migrated = LIGHT_DOCK_MIGRATION[prefs.dockMode];
+              if (migrated !== undefined) prefs.dockMode = migrated;
+              try {
+                storage?.setItem(
+                  LIGHT_PREFS_KEY,
+                  JSON.stringify({ ...parsed, ...prefs, v: LIGHT_PREFS_VERSION }),
+                );
+              } catch (_error) {
+                /* хранилище недоступно: исправленное значение живёт до перезагрузки */
+              }
             }
           }
           return prefs;
@@ -3058,7 +3105,9 @@ window.__ModuleLoader__.load({
           }
           value = next;
           try {
-            storage?.setItem(LIGHT_PREFS_KEY, JSON.stringify(next));
+            // Маркер пишется всегда: иначе выбор, сделанный уже после миграции,
+            // при следующей загрузке снова попал бы под исправление значений.
+            storage?.setItem(LIGHT_PREFS_KEY, JSON.stringify({ ...next, v: LIGHT_PREFS_VERSION }));
           } catch (_error) {
             /* приватный режим или запрет записи: настройка живёт до перезагрузки */
           }
@@ -3953,14 +4002,20 @@ window.__ModuleLoader__.load({
         className: `${LIGHT_CLASS}-lamp-wrap`,
       }, dot);
       const content = [lampNode];
-      if (dockMode === 'lamp-time-label') {
+      // Состав строки соответствует подписи режима в форме: значения настройки
+      // (`time`, `lamp-time`, `lamp-time-label`) остались прежними, чтобы не
+      // плодить миграций, но картинка каждого теперь честная.
+      if (dockMode === 'lamp-time') {
+        // «Индикатор, название и оставшееся время»: сначала название статуса,
+        // за ним отсчёт — строка читается слева направо.
         content.push(React.createElement('span', { key: 'label', className: `${LIGHT_CLASS}-label` }, t(lightLabelKey(status.light))));
       }
-      if (dockMode === 'time') {
+      if (dockMode === 'time' || dockMode === 'lamp-time') {
         // Основной режим — не часы, а оставшееся время до смены тарифа:
         // на зелёном/жёлтом до красного, на красном до зелёного.
         if (remaining !== '') content.push(React.createElement('span', { key: 'remaining', className: `${LIGHT_CLASS}-count` }, remaining));
-      } else if (dockMode !== 'lamp') {
+      }
+      if (dockMode === 'lamp-time-label') {
         // Явно выбранный «текущее время»: часы браузера, обновляются раз в минуту.
         content.push(React.createElement('span', { key: 'time', className: `${LIGHT_CLASS}-count` }, formatClock(now)));
       }
@@ -4051,6 +4106,9 @@ window.__ModuleLoader__.load({
           React.createElement('span', null, copy('light.setting.dock')),
           choice({
             value: dockMode,
+            // Значения режимов не менялись с версии 1 настроек: подпись объясняет
+            // ровно то, что режим рисует у лампы («оставшееся» — отсчёт,
+            // «текущее» — часы браузера).
             options: [
               { value: 'lamp', label: copy('light.setting.dock.lamp') },
               { value: 'time', label: copy('light.setting.dock.timeOnly') },
@@ -9036,7 +9094,9 @@ window.__ModuleLoader__.load({
                 slots.register(
                   {
                     name: 'plugins.bundle.config',
-                    key: 'dsh-tweaks',
+                    // Ключ слота — имя npm-пакета: страница плагинов ищет нашу
+                    // форму по `pkg.name`, а не по словарному namespace.
+                    key: PLUGIN_ID,
                     locale: NS,
                     inject: () => ({ controller, translate: createTranslator(locale) }),
                   },

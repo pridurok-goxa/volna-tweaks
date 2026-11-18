@@ -902,7 +902,7 @@ function checkAsync(name, fn) {
  * @returns {Array<object>} строки формы: по одной на твик.
  */
 function formRows(env) {
-  const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
+  const entry = env.slotEntry('plugins.bundle.config', PACKAGE.name);
   assert.ok(entry, 'форма флагов зарегистрирована в слоте plugins.bundle.config');
   const form = entry.entry.component({
     ...entry.entry.options.inject(),
@@ -1005,7 +1005,7 @@ function settle() {
  * @returns {object} дерево кнопки подготовки.
  */
 function whisperDetail(env) {
-  const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
+  const entry = env.slotEntry('plugins.bundle.config', PACKAGE.name);
   assert.ok(entry, 'форма флагов зарегистрирована в слоте');
   const form = entry.entry.component({
     ...entry.entry.options.inject(),
@@ -1120,7 +1120,7 @@ check('без службы конфигурации работают дефол�
   assert.ok(env.menuElement(), 'твик «меню» включён по дефолту');
   assert.equal(env.formsSubscribers(), 0, 'подписываться не на что — и не падаем');
   assert.equal(env.formsIds().length, 0, 'службы нет: форму не спрашиваем');
-  const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
+  const entry = env.slotEntry('plugins.bundle.config', PACKAGE.name);
   assert.ok(entry, 'форма флагов всё равно зарегистрирована');
   const form = entry.entry.component({ ...entry.entry.options.inject(), view: 'page', t: (key) => key, translate: (key) => key });
   assert.equal(form.children.filter((child) => child.props?.['data-tweak']).length, 10, 'показывает состояние всех твиков');
@@ -1530,7 +1530,7 @@ check('плагин освобождает ресурсы при выгрузк�
   assert.ok(!env.zoom(), 'до выгрузки масштаб не задан');
   env.setFlags({ zoom: false, contextMenu: false });
   // Форма флагов — ресурс пакета, а не твика: без неё твики было бы нечем включить.
-  assert.ok(env.slotEntry('plugins.bundle.config', 'dsh-tweaks'), 'форма флагов остаётся на месте');
+  assert.ok(env.slotEntry('plugins.bundle.config', PACKAGE.name), 'форма флагов остаётся на месте');
   assert.equal(env.listenerCount('keydown'), 0, 'а работающие твики выключены');
   env.setFlags({ zoom: true, contextMenu: true });
   assert.equal(env.listenerCount('storage'), 1, 'твик снова подписан на вкладки');
@@ -1538,7 +1538,7 @@ check('плагин освобождает ресурсы при выгрузк�
   assert.equal(env.listenerCount('storage'), 0, 'выгрузка сняла подписку на storage');
   assert.equal(env.listenerCount('keydown'), 0, 'и перехват клавиш');
   assert.equal(env.formsSubscribers(), 0, 'и подписку на флаги конфигурации');
-  assert.equal(env.slotEntry('plugins.bundle.config', 'dsh-tweaks'), null, 'форма флагов снята со слота');
+  assert.equal(env.slotEntry('plugins.bundle.config', PACKAGE.name), null, 'форма флагов снята со слота');
   assert.equal(env.menuElement(), null, 'меню по правой кнопке убрано из body');
 });
 
@@ -1986,7 +1986,7 @@ check('выгрузка плагина снимает масштаб и ресу
 
 checkAsync('форма пишет флаг операцией set с прочитанной ревизией', async () => {
   const env = loadPlugin({ flags: { zoom: true, contextMenu: true } });
-  const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
+  const entry = env.slotEntry('plugins.bundle.config', PACKAGE.name);
   assert.ok(entry, 'форма зарегистрирована в слоте plugins.bundle.config');
   assert.equal(entry.entry.options.locale, 'dsh-tweaks', 'подписи формы берутся из словаря пакета');
   const injected = entry.entry.options.inject();
@@ -2012,7 +2012,7 @@ checkAsync('форма пишет флаг операцией set с прочи�
 
 checkAsync('форма блокирует запись там, где документ только для чтения', async () => {
   const env = loadPlugin({ writable: false });
-  const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
+  const entry = env.slotEntry('plugins.bundle.config', PACKAGE.name);
   const form = entry.entry.component({ ...entry.entry.options.inject(), view: 'page', t: (key) => key, translate: (key) => key });
   for (const row of form.children.filter((child) => child.props?.['data-tweak'])) {
     assert.equal(row.children[1].props.disabled, true, 'переключатель заблокирован');
@@ -2434,11 +2434,60 @@ function indicatorTexts(node) {
   return texts;
 }
 
-check('нижний индикатор: режим из настроек устройства', () => {
-  const dockRow = (env) =>
-    env.slotEntries.find((row) => row.name === 'conversation.composer.dock' && row.entry.options.id === 'traffic-light') ?? null;
+/** Короткий остаток у лампы: «2ч 15м», «35м», «<1м» (в en — h/m). */
+const DOCK_COUNTDOWN = /^(?:\d+\s*[чh]\s*\d+\s*[мm]|\d+\s*[мm]|<\s*1\s*[мm])$/iu;
 
-  const header = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
+/** Текущее время браузера у лампы: «HH:MM». */
+const DOCK_CLOCK = /^\d{2}:\d{2}$/;
+
+/** Флаги песочницы со включённым светофором. */
+const LIGHT_FLAGS = { zoom: true, contextMenu: true, trafficLight: true };
+
+/**
+ * Выборы блока настроек светофора на странице пакета.
+ *
+ * Подписи берутся из той же формы, что видит человек, но переводчик подменный:
+ * `copy` возвращает ключ словаря, поэтому по выбору видно, какая подпись стоит
+ * у какого значения.
+ * @param {object} env - песочница плагина.
+ * @param {Function} [copy] - переводчик подписей (по умолчанию — ключ как есть).
+ * @returns {object[]} элементы select: режим индикатора и предупреждение.
+ */
+function lightSettingSelects(env, copy = (key) => key) {
+  const entry = env.slotEntry('plugins.bundle.config', PACKAGE.name);
+  assert.ok(entry, 'форма флагов зарегистрирована в слоте plugins.bundle.config');
+  const form = entry.entry.component({
+    ...entry.entry.options.inject(),
+    view: 'page',
+    t: copy,
+    translate: copy,
+  });
+  const detail = form.children
+    .map((child) => child?.children?.[0])
+    .find((child) => typeof child?.type === 'function' && child.type.name === 'TrafficLightSettings');
+  assert.ok(detail, 'у твика «светофор» есть блок настроек');
+  const selects = findElements(detail.type(detail.props), (node) => node.type === 'select');
+  assert.equal(selects.length, 2, 'два выбора: нижний индикатор и предупреждение');
+  return selects;
+}
+
+/**
+ * Отрисовать нижний индикатор в заданном режиме.
+ *
+ * Настройка пишется с маркером `v: 2` — это выбор, сделанный уже по честной
+ * подписи: без маркера старые значения прошли бы миграцию (см. проверку ниже).
+ * @param {string|null} dockMode - режим из настроек устройства (`null` — настройки нет).
+ * @returns {{env: object, tree: object, texts: string[]}} песочница, дерево док-строки и тексты у лампы.
+ */
+function dockRender(dockMode) {
+  const lightPrefs = dockMode === null ? null : { dockMode, v: 2 };
+  const env = loadPlugin({ flags: LIGHT_FLAGS, lightPrefs });
+  const tree = dockLight(env);
+  return { env, tree, texts: indicatorTexts(tree) };
+}
+
+check('нижний индикатор: каждый режим рисует обещанное', () => {
+  const header = loadPlugin({ flags: LIGHT_FLAGS });
   assert.deepEqual(
     headerParts(header).filter((node) => node?.props?.variant === 'header'),
     [],
@@ -2446,38 +2495,88 @@ check('нижний индикатор: режим из настроек уст�
   );
   assert.ok(dockRow(header).entry.options.order < 0, 'в доке светофор идёт первым: порядок отрицательный');
 
-  const expected = { lamp: 0, 'lamp-time': 1, time: 1, 'lamp-time-label': 2 };
-  for (const [dockMode, count] of Object.entries(expected)) {
-    const env = loadPlugin({
-      flags: { zoom: true, contextMenu: true, trafficLight: true },
-      lightPrefs: { dockMode },
-    });
-    const tree = renderSlot(dockRow(env));
-    const texts = indicatorTexts(tree);
-    assert.equal(texts.length, count, `режим ${dockMode}: подписей рядом с лампой — ${count} (${texts.join(' | ')})`);
-    const lampText = [];
-    const walkNodes = (node) => {
-      if (node === null || node === undefined || typeof node !== 'object') return;
-      if (Array.isArray(node)) {
-        for (const item of node) walkNodes(item);
-        return;
-      }
-      if (String(node.props?.className ?? '').split(/\s+/).includes('dsh-ui-light-lamp')) lampText.push(node);
-      walkNodes(node.children);
-    };
-    walkNodes(tree);
-    assert.equal(lampText.length, 1, `режим ${dockMode}: лампа на месте`);
-  }
+  // Значения режимов прежние (поэтому миграции сохранённых настроек нет), но
+  // картинка каждого честная: остаток у `time` и `lamp-time`, часы браузера —
+  // только у `lamp-time-label`, а у `lamp` кроме лампы ничего нет.
+  const lamp = dockRender('lamp');
+  assert.deepEqual(lamp.texts, [], 'режим lamp: рядом с лампой ни подписи, ни времени');
+  assert.ok(findLamp(lamp.tree), 'режим lamp: лампа на месте');
+
+  const time = dockRender('time');
+  assert.equal(time.texts.length, 1, `режим time: один текст (${time.texts.join(' | ')})`);
+  assert.match(time.texts[0], DOCK_COUNTDOWN, 'режим time: остаток до смены тарифа');
+  assert.doesNotMatch(time.texts[0], DOCK_CLOCK, 'режим time: не текущие часы');
+  assert.ok(findLamp(time.tree), 'режим time: лампа на месте');
+
+  const both = dockRender('lamp-time');
+  assert.equal(both.texts.length, 2, `режим lamp-time: название статуса и остаток (${both.texts.join(' | ')})`);
+  assert.match(
+    both.texts[0],
+    /^(?:Дешёвые часы|Дорогие часы|Скоро дорогие часы)$/u,
+    'режим lamp-time: сначала название статуса',
+  );
+  assert.match(both.texts[1], DOCK_COUNTDOWN, 'режим lamp-time: за названием — остаток');
+  assert.ok(findLamp(both.tree), 'режим lamp-time: лампа на месте');
+
+  const clock = dockRender('lamp-time-label');
+  assert.equal(clock.texts.length, 1, `режим lamp-time-label: один текст (${clock.texts.join(' | ')})`);
+  assert.match(clock.texts[0], DOCK_CLOCK, 'режим lamp-time-label: текущее время браузера');
+  assert.ok(findLamp(clock.tree), 'режим lamp-time-label: лампа на месте');
 
   // Настройка по умолчанию — «Индикатор и оставшееся время»: лампа и отсчёт
   // до смены тарифа, а не текущие часы.
-  const fresh = loadPlugin({ flags: { zoom: true, contextMenu: true, trafficLight: true } });
-  const freshTree = renderSlot(dockRow(fresh));
-  const freshTexts = indicatorTexts(freshTree);
-  assert.equal(freshTexts.length, 1, 'по умолчанию показывается один отсчёт');
-  assert.doesNotMatch(freshTexts[0], /^\d{2}:\d{2}$/, 'по умолчанию не текущие часы');
-  assert.match(freshTexts[0], /^\d+\s*(?:[чh]|м|m)/iu, 'по умолчанию — короткое оставшееся время');
-  assert.match(JSON.stringify(freshTree), /-lamp/, 'в варианте «индикатор и время» лампа тоже показывается');
+  const fresh = dockRender(null);
+  assert.equal(fresh.texts.length, 1, 'по умолчанию показывается один отсчёт');
+  assert.doesNotMatch(fresh.texts[0], DOCK_CLOCK, 'по умолчанию не текущие часы');
+  assert.match(fresh.texts[0], DOCK_COUNTDOWN, 'по умолчанию — короткое оставшееся время');
+});
+
+check('подписи режимов в ru и en не врут', () => {
+  // Сторож от перепутанных подписей: вариант, чья подпись обещает «оставшееся»,
+  // обязан рисовать остаток, а «текущее время» — часы. Проверяются оба словаря.
+  const env = loadPlugin({ flags: LIGHT_FLAGS });
+  const ru = env.dictionaries.find((row) => row.locale === 'ru')?.dict ?? {};
+  const en = env.dictionaries.find((row) => row.locale === 'en')?.dict ?? {};
+  const selects = lightSettingSelects(env);
+  const modes = selects[0].children.flat(Infinity).map((option) => ({
+    value: option.props.value,
+    key: option.children[0],
+  }));
+  assert.deepEqual(
+    modes.map((mode) => mode.value),
+    ['lamp', 'time', 'lamp-time', 'lamp-time-label'],
+    'четыре варианта нижнего индикатора, значения прежние',
+  );
+  // Значение → ключ подписи: связь закреплена, чтобы правка подписи в одном
+  // месте не разъехалась с картинкой в другом.
+  assert.deepEqual(
+    modes.map((mode) => mode.key),
+    ['light.setting.dock.lamp', 'light.setting.dock.timeOnly', 'light.setting.dock.time', 'light.setting.dock.label'],
+    'подписи режимов взяты из своих ключей словаря',
+  );
+  const ruLabels = modes.map((mode) => ru[mode.key]);
+  assert.equal(new Set(ruLabels).size, ruLabels.length, 'подписи режимов различаются');
+
+  for (const mode of modes) {
+    const { texts } = dockRender(mode.value);
+    const joined = texts.join(' | ');
+    const clock = texts.some((text) => DOCK_CLOCK.test(text));
+    const countdown = texts.some((text) => DOCK_COUNTDOWN.test(text));
+    for (const [locale, dict] of [['ru', ru], ['en', en]]) {
+      const label = String(dict[mode.key] ?? '');
+      assert.ok(label.length > 0, `${locale}: подпись режима ${mode.value} есть в словаре`);
+      if (/оставшееся|time left/iu.test(label)) {
+        assert.ok(countdown, `${locale}: ${mode.value} обещает остаток — остаток и нарисован (${joined})`);
+        assert.equal(clock, false, `${locale}: ${mode.value} обещает остаток, а не часы (${joined})`);
+      } else if (/текущее|current/iu.test(label)) {
+        assert.ok(clock, `${locale}: ${mode.value} обещает текущее время — часы и нарисованы (${joined})`);
+        assert.equal(countdown, false, `${locale}: ${mode.value} обещает только часы (${joined})`);
+      } else {
+        assert.equal(texts.length, 0, `${locale}: ${mode.value} обещает только индикатор (${joined})`);
+      }
+    }
+  }
+  assert.notEqual(ru['light.setting.dock.timeOnly'], en['light.setting.dock.timeOnly'], 'подпись переведена на оба языка');
 });
 
 check('настройки твика предлагают режим индикатора и время предупреждения', () => {
@@ -2485,7 +2584,7 @@ check('настройки твика предлагают режим индик�
     flags: { zoom: true, contextMenu: true, trafficLight: true },
     lightPrefs: { dockMode: 'lamp', warningMinutes: 20 },
   });
-  const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
+  const entry = env.slotEntry('plugins.bundle.config', PACKAGE.name);
   const form = entry.entry.component({
     ...entry.entry.options.inject(),
     view: 'page',
@@ -2519,6 +2618,62 @@ check('настройки твика предлагают режим индик�
   );
   assert.equal(selects[1].props.value, '20', 'выбранное предупреждение показано');
   assert.deepEqual(optionValues(selects[1]), ['10', '20', '30'], 'предупреждение настраивается на 10, 20 или 30 минут');
+});
+
+check('миграция старых настроек: смысл подписи важнее номера режима', () => {
+  // До версии 2 подписи спорили с картинкой: выбранное «Индикатор и оставшееся
+  // время» (`lamp-time`) рисовало часы. Поэтому сохранённый выбор человека
+  // переводится в режим, который он хотел видеть, ровно один раз — по маркеру `v: 2`.
+  const KEY = 'dsh.ui-light.settings.v1';
+  const stored = (env) => JSON.parse(env.windowStorage(KEY));
+
+  // (а) старый `lamp-time` → «оставшееся время».
+  const timeEnv = loadPlugin({ flags: LIGHT_FLAGS, lightPrefs: { dockMode: 'lamp-time' } });
+  assert.equal(stored(timeEnv).dockMode, 'time', 'сохранённый lamp-time читается как time');
+  assert.equal(stored(timeEnv).v, 2, 'исправленное значение записано обратно с маркером v:2');
+  const timeTexts = indicatorTexts(dockLight(timeEnv));
+  assert.equal(timeTexts.length, 1, 'после миграции у лампы один текст');
+  assert.match(timeTexts[0], DOCK_COUNTDOWN, 'и это остаток, а не текущие часы');
+
+  // (б) повторное чтение того же значения уже не мигрирует и ничего не пишет.
+  const before = timeEnv.windowStorage(KEY);
+  const againEnv = loadPlugin({ flags: LIGHT_FLAGS, lightPrefs: JSON.parse(before) });
+  assert.equal(againEnv.windowStorage(KEY), before, 'второе чтение не переписывает настройку');
+  assert.equal(stored(againEnv).dockMode, 'time', 'и режим остался прежним');
+
+  // (в) старый `lamp-time-label` → «название статуса и остаток».
+  const labelEnv = loadPlugin({ flags: LIGHT_FLAGS, lightPrefs: { dockMode: 'lamp-time-label' } });
+  assert.equal(stored(labelEnv).dockMode, 'lamp-time', 'сохранённый lamp-time-label читается как lamp-time');
+  assert.equal(stored(labelEnv).v, 2, 'маркер поставлен и здесь');
+  assert.equal(indicatorTexts(dockLight(labelEnv)).length, 2, 'после миграции — название статуса и остаток');
+
+  // (г) с маркером `v: 2` значение не трогаем: выбор сделан по честной подписи.
+  const markedEnv = loadPlugin({ flags: LIGHT_FLAGS, lightPrefs: { dockMode: 'lamp-time', v: 2 } });
+  assert.equal(stored(markedEnv).dockMode, 'lamp-time', '{dockMode:lamp-time, v:2} остаётся lamp-time');
+  const markedBefore = markedEnv.windowStorage(KEY);
+  assert.equal(
+    loadPlugin({ flags: LIGHT_FLAGS, lightPrefs: JSON.parse(markedBefore) }).windowStorage(KEY),
+    markedBefore,
+    'значение с маркером не переписывается',
+  );
+
+  // (д) выбор, сделанный после миграции, тоже получает маркер и не мигрирует заново.
+  const chosenEnv = loadPlugin({ flags: LIGHT_FLAGS, lightPrefs: { dockMode: 'lamp-time' } });
+  const modeSelect = lightSettingSelects(chosenEnv)[0];
+  modeSelect.props.onChange({ target: { value: 'lamp-time' } });
+  assert.equal(stored(chosenEnv).dockMode, 'lamp-time', 'новый выбор сохранён как есть');
+  assert.equal(stored(chosenEnv).v, 2, 'и записан с маркером');
+  const reloaded = loadPlugin({ flags: LIGHT_FLAGS, lightPrefs: JSON.parse(chosenEnv.windowStorage(KEY)) });
+  assert.equal(stored(reloaded).dockMode, 'lamp-time', 'после перезагрузки выбор не мигрирует повторно');
+
+  // (е) испорченные значения по-прежнему отбрасываются, настройка соседа цела.
+  const brokenEnv = loadPlugin({ flags: LIGHT_FLAGS, lightPrefs: { dockMode: 'bogus', warningMinutes: 99 } });
+  assert.equal(lightSettingSelects(brokenEnv)[0].props.value, 'time', 'испорченный режим отброшен: работает умолчание');
+  assert.equal(lightSettingSelects(brokenEnv)[1].props.value, '10', 'испорченное предупреждение тоже отброшено');
+  const keptEnv = loadPlugin({ flags: LIGHT_FLAGS, lightPrefs: { dockMode: 'lamp', warningMinutes: 20 } });
+  assert.equal(stored(keptEnv).dockMode, 'lamp', 'честное значение не трогается');
+  assert.equal(stored(keptEnv).warningMinutes, 20, 'предупреждение при миграции сохраняется');
+  assert.equal(stored(keptEnv).v, 2, 'и маркер поставлен');
 });
 
 check('панель светофора открывается только по нажатию', () => {
@@ -2993,7 +3148,7 @@ function stripComments(source) {
  * @returns {object} узел формы.
  */
 function formTree(env, copy = (key) => key) {
-  const entry = env.slotEntry('plugins.bundle.config', 'dsh-tweaks');
+  const entry = env.slotEntry('plugins.bundle.config', PACKAGE.name);
   assert.ok(entry, 'форма флагов зарегистрирована в слоте plugins.bundle.config');
   return entry.entry.component({ ...entry.entry.options.inject(), view: 'page', t: copy, translate: copy });
 }
@@ -3064,14 +3219,31 @@ function updateStatusOf(overrides = {}) {
   };
 }
 
-check('id клиентского модуля равен name из package.json', () => {
+check('id клиентского модуля и ключ формы равны name из package.json', () => {
   // Имя пакета меняли, а id модуля остался строкой `dsh-tweaks` — клиентская
-  // половина молча не запускалась вовсе. Сторож сравнивает источник с манифестом.
+  // половина молча не запускалась вовсе. Теперь одна константа держит и
+  // загрузку модуля, и ключ слота `plugins.bundle.config`: страница плагинов
+  // адресует форму именем npm-пакета, и при расхождении галочки твиков
+  // пропадают со страницы пакета — остаётся одно описание.
   const source = fs.readFileSync(CLIENT, 'utf8');
-  const match = /__ModuleLoader__\.load\(\{\s*id:\s*'([^']+)'/.exec(source);
-  assert.ok(match, 'client.js объявляет id модуля при загрузке');
-  assert.equal(match[1], PACKAGE.name, 'id в client.js совпадает с name из package.json');
+  const match = /const PLUGIN_ID = '([^']+)';/.exec(source);
+  assert.ok(match, 'client.js объявляет константу PLUGIN_ID');
+  assert.equal(match[1], PACKAGE.name, 'PLUGIN_ID совпадает с name из package.json');
+  assert.match(source, /__ModuleLoader__\.load\(\{\s*id: PLUGIN_ID,/, 'модуль грузится под PLUGIN_ID');
+  assert.match(source, /key: PLUGIN_ID,/, 'слот формы адресуется PLUGIN_ID');
   assert.ok(PACKAGE.version.length > 0, 'версия пакета объявлена');
+
+  // Ключ слота проверяется и на живой регистрации: по нему форма находится.
+  const env = loadPlugin();
+  const entries = env.slotEntries.filter((row) => row.name === 'plugins.bundle.config');
+  assert.equal(entries.length, 1, 'форма зарегистрирована в слоте ровно один раз');
+  assert.equal(entries[0].entry.options.key, PACKAGE.name, 'key регистрации равен name из package.json');
+  assert.ok(env.slotEntry('plugins.bundle.config', PACKAGE.name), 'форма находится по имени пакета');
+  assert.equal(
+    env.slotEntry('plugins.bundle.config', 'dsh-tweaks'),
+    null,
+    'старый ключ `dsh-tweaks` больше не регистрируется: по нему форма не попадала на страницу',
+  );
 });
 
 check('строки блока «Обновление» есть в обоих словарях', () => {
