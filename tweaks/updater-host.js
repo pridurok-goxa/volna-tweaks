@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -32,18 +33,20 @@ import { fileURLToPath } from 'node:url';
  * списка не запускает процесс вовсе (см. `runGitProcess`). Аргументы всегда
  * массиво постоянных строк и проверенного `sha`, аргументов из интерфейса нет.
  *
- * Состояние: `$DSH_HOME/<каталог плагина>/update.json` (кэш статуса, запись
+ * Состояние: `<корень>/<каталог плагина>/update.json` (кэш статуса, запись
  * атомарная: tmp + rename) и `update.log` (строка на событие, ротация 1 МБ).
- * Каталог — имя папки плагина: у светофора оно зашито как `dsh-tweaks`, здесь
- * берётся из пути модуля (`$DSH_HOME/dsh-tweaks` при установке в папку
- * `dsh-tweaks`); имена файлов свои, чужое состояние не трогается.
+ * Корень — `$DSH_HOME`, а при пустой переменной — домашний каталог DSH
+ * `~/.dsh` (десктопное приложение `DSH_HOME` не выставляет). Каталог — имя
+ * папки плагина: у светофора оно зашито как `dsh-tweaks`, здесь берётся из пути
+ * модуля (`~/.dsh/dsh-tweaks` при установке в папку `dsh-tweaks`); имена файлов
+ * свои, чужое состояние не трогается.
  *
  * Отказоустойчивость: вся работа в try/catch, исключение не поднимается в
  * загрузчик плагина; отсутствие `.git` — штатное состояние `skipped/no-git`.
  *
  * Интерфейс модуля: `activate(ctx, config, deps)`, `update(config)`,
  * `deactivate()`; для тестов — `decideUpdate`, `buildStatus`, `formatLogLine`,
- * `checkNow(deps)` и третий аргумент `activate` с подставным `git`.
+ * `stateDir`, `checkNow(deps)` и третий аргумент `activate` с подставным `git`.
  *
  * @module dsh-tweaks/updater-host
  */
@@ -152,14 +155,43 @@ function serviceOf(ctx, name) {
 }
 
 /**
+ * Корень файлов состояния: `$DSH_HOME`, а при пустой переменной — домашний
+ * каталог DSH `~/.dsh`.
+ * @param {object} [options] - подстановки для тестов.
+ * @param {object} [options.vars] - переменные окружения (по умолчанию `process.env`).
+ * @param {Function} [options.home] - получение домашнего каталога (по умолчанию `os.homedir`).
+ * @returns {string | null} корень либо null, если домашний каталог недоступен.
+ */
+function stateRoot(options = {}) {
+  const plain = options !== null && typeof options === 'object' ? options : {};
+  const vars = plain.vars !== undefined ? plain.vars : typeof process === 'object' ? process?.env : undefined;
+  const home = typeof vars?.DSH_HOME === 'string' ? vars.DSH_HOME : '';
+  if (home !== '') return home;
+  const readHome = typeof plain.home === 'function' ? plain.home : homedir;
+  let dir = '';
+  try {
+    dir = readHome();
+  } catch (_error) {
+    return null;
+  }
+  return typeof dir === 'string' && dir !== '' ? join(dir, '.dsh') : null;
+}
+
+/**
  * Каталог состояния твика в домашней папке DSH: имя — как у папки плагина
  * (у светофора то же имя зашито константой `dsh-tweaks`).
- * @returns {string | null} каталог либо null без `DSH_HOME`.
+ *
+ * Фолбэк на `~/.dsh` нужен потому, что десктопное приложение DSH переменную
+ * `DSH_HOME` не выставляет: раньше функция молча отдавала null и в живом
+ * приложении не появлялось ни `update.json`, ни `update.log`. Недоступный или
+ * нечисловой домашний каталог — тихий null, исключение не поднимается.
+ * @param {object} [options] - подстановки для тестов (см. `stateRoot`).
+ * @returns {string | null} каталог либо null.
  */
-function stateDir() {
-  const home = typeof process === 'object' ? process?.env?.DSH_HOME : undefined;
-  if (typeof home !== 'string' || home === '') return null;
-  return join(home, basename(PLUGIN_DIR) || 'dsh-tweaks');
+export function stateDir(options = {}) {
+  const root = stateRoot(options);
+  if (root === null) return null;
+  return join(root, basename(PLUGIN_DIR) || 'dsh-tweaks');
 }
 
 /**

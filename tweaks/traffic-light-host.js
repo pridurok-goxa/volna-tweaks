@@ -1,4 +1,5 @@
 import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 /**
@@ -174,12 +175,24 @@ function logLine(line) {
 }
 
 /**
- * Каталог файлов твика в домашней папке DSH; без DSH_HOME — null.
+ * Каталог файлов твика в домашней папке DSH.
+ *
+ * Основной вариант — `$DSH_HOME/dsh-tweaks`. Десктопное приложение DSH эту
+ * переменную не выставляет, поэтому при пустом значении корнем становится
+ * домашний каталог DSH `~/.dsh` (иначе журнал и леджеры молча не писались бы).
+ * Недоступный домашний каталог — тихий null, исключение не поднимается.
  * @returns {string | null} каталог либо null.
  */
 function stateDir() {
   const home = typeof process === 'object' ? process?.env?.DSH_HOME : undefined;
-  return typeof home === 'string' && home !== '' ? join(home, 'dsh-tweaks') : null;
+  if (typeof home === 'string' && home !== '') return join(home, 'dsh-tweaks');
+  let userHome = '';
+  try {
+    userHome = homedir();
+  } catch (_error) {
+    return null;
+  }
+  return typeof userHome === 'string' && userHome !== '' ? join(userHome, '.dsh', 'dsh-tweaks') : null;
 }
 
 /**

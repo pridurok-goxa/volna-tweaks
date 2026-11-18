@@ -22,7 +22,10 @@
  *      полный клон 1.0.0 + апстрим 2.0.0 → `updated`, файл 2.0.0, клон не
  *      shallow; `clone --depth=1` чинится `--unshallow` и тоже обновляется;
  *      повторная проверка актуального клона — `up-to-date` без merge. Если git
- *      в окружении нет, эти кейсы явно пропускаются с сообщением.
+ *      в окружении нет, эти кейсы явно пропускаются с сообщением;
+ *   9. `stateDir` — каталог состояния: внутри заданного `DSH_HOME`; при пустой
+ *      переменной — под `<homedir>/.dsh/<папка плагина>` (десктопное приложение
+ *      `DSH_HOME` не выставляет); недоступный домашний каталог — тихий null.
  *
  * Запуск: node test/check-updater.cjs
  */
@@ -301,6 +304,8 @@ function readLog() {
 
 (async () => {
   const host = await import(pathToFileURL(HOST_PATH).href);
+  /** Имя папки плагина — второе слагаемое каталога состояния. */
+  const PLUGIN_FOLDER = path.basename(host.PLUGIN_DIR);
 
   await test('decideUpdate: мы позади — только fast-forward', () => {
     assert.deepEqual(host.decideUpdate({ head: HEAD_SHA, upstream: UPSTREAM_SHA, dirty: false, behind: true, ahead: false }), {
@@ -405,6 +410,31 @@ function readLog() {
       assert.ok(line.includes(marker), `в строке есть ${marker}`);
     }
     assert.equal(host.formatLogLine({}).includes('\n'), false, 'пустое событие тоже одна строка');
+  });
+
+  await test('stateDir: DSH_HOME задан — каталог состояния внутри него', () => {
+    const explicit = path.join(os.tmpdir(), 'dsh-home-explicit');
+    assert.equal(host.stateDir({ vars: { DSH_HOME: explicit } }), path.join(explicit, PLUGIN_FOLDER));
+    assert.equal(host.stateDir({ vars: { DSH_HOME: process.env.DSH_HOME } }), STATE_DIR, 'в тесте пишем во временный DSH_HOME');
+  });
+
+  await test('stateDir: DSH_HOME пустой — путь под <homedir>/.dsh (десктоп переменную не выставляет)', () => {
+    for (const vars of [{}, { DSH_HOME: '' }, { DSH_HOME: undefined }]) {
+      const dir = host.stateDir({ vars });
+      assert.equal(dir, path.join(os.homedir(), '.dsh', PLUGIN_FOLDER), 'корень — домашний каталог DSH');
+    }
+  });
+
+  await test('stateDir: домашний каталог недоступен — тихий null без исключения', () => {
+    const boom = () => {
+      throw new Error('homedir недоступен');
+    };
+    assert.equal(host.stateDir({ vars: {}, home: boom }), null, 'исключение не поднимается');
+    assert.equal(host.stateDir({ vars: { DSH_HOME: '' }, home: boom }), null);
+    assert.equal(host.stateDir({ vars: { DSH_HOME: '' }, home: () => '' }), null, 'пустой домашний каталог — не путь');
+    assert.equal(host.stateDir({ vars: { DSH_HOME: '' }, home: () => 42 }), null, 'не строка — не путь');
+    const explicit = path.join(os.tmpdir(), 'dsh-home-explicit');
+    assert.equal(host.stateDir({ vars: { DSH_HOME: explicit }, home: boom }), path.join(explicit, PLUGIN_FOLDER), 'заданный DSH_HOME сильнее');
   });
 
   await test('checkNow: без .git — skipped/no-git, git не зовётся', async () => {
