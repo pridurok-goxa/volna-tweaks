@@ -12,6 +12,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
  *
  * Четыре проверки на `tools/pre-execute` (до тела инструмента):
  *  1. secrets — секрет в аргументах bash: `PGPASSWORD=<литерал>`, DSN
+ *     (23.11.2026: и вывод `*.env`/`deploy.env` cat/sed/grep без маски — checkEnvDump),
  *     `postgres://user:<пароль>@`, `--password=<литерал>`, `Bearer <токен>`,
  *     известные префиксы токенов (ghp_, gho_, github_pat_, re_, sk-…, xox?-).
  *     Ссылка на переменную (`$VAR`, `${VAR}`, `$(…)`) разрешена.
@@ -94,7 +95,79 @@ export function checkSecrets(command) {
   if (/\bre_[A-Za-z0-9]{8,}_[A-Za-z0-9]{12,}/.test(command)) return 'ключ Resend';
   if (/\bsk-[A-Za-z0-9_-]{32,}/.test(command)) return 'API-ключ sk-…';
   if (/\bxox[abpr]-[A-Za-z0-9-]{20,}/.test(command)) return 'токен Slack';
+  if (checkEnvDump(command)) return 'вывод .env-файла';
   return null;
+}
+
+/** Путь к env-файлу: `.env`, `.env.local`, `deploy.env`, `/etc/unico.env`. */
+const ENV_FILE = /(?:^|[\s'"=<])(?:[^\s'"|;&<>]*\/)?(?:\.env(?:\.[\w-]+)?|[\w.-]+\.env)(?=$|[\s'"|;&)<>])/;
+/** Команды, которые печатают содержимое файла. */
+const PRINTERS = new Set(['cat', 'tac', 'less', 'more', 'head', 'tail', 'bat', 'batcat', 'nl', 'strings', 'xxd', 'od', 'hexdump',
+  'sed', 'awk', 'gawk', 'grep', 'egrep', 'fgrep', 'rg', 'ag', 'cut', 'sort', 'uniq', 'column', 'diff', 'paste', 'tr', 'jq']);
+
+/** Стадия конвейера сама маскирует или не печатает значения. */
+function masksValues(stage) {
+  const words = shellWords(stage);
+  const tool = (words[0] ?? '').replace(/^.*\//, '');
+  if (stage.includes('***')) return true;
+  if (tool === 'wc') return true;
+  if (tool === 'cut' && /-d\s*['"]?=['"]?/.test(stage) && /-f\s*1(?!\d|-)/.test(stage)) return true;
+  if (['grep', 'egrep', 'fgrep', 'rg'].includes(tool) && words.some((w) => /^-[a-zA-Z]*[clLq][a-zA-Z]*$/.test(w) || ['--count', '--quiet', '--files-with-matches', '--files-without-match'].includes(w))) return true;
+  return false;
+}
+
+/**
+ * Разбить команду на конвейеры и стадии по `;`, `&&`, `||`, переводу строки и `|` вне кавычек.
+ * @param {string} command - текст bash-команды.
+ * @returns {string[][]} конвейеры, в каждом — стадии.
+ */
+function pipelines(command) {
+  const out = [];
+  let stages = [];
+  let cur = '';
+  let quote = null;
+  const flush = (endChain) => {
+    stages.push(cur); cur = '';
+    if (endChain) { out.push(stages); stages = []; }
+  };
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i];
+    if (quote) {
+      if (ch === '\\' && quote === '"' && i + 1 < command.length) { cur += ch + command[i + 1]; i += 1; continue; }
+      if (ch === quote) quote = null;
+      cur += ch; continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; cur += ch; continue; }
+    if (ch === '\\' && i + 1 < command.length) { cur += ch + command[i + 1]; i += 1; continue; }
+    const two = command.slice(i, i + 2);
+    if (two === '&&' || two === '||') { flush(true); i += 1; continue; }
+    if (ch === ';' || ch === '\n') { flush(true); continue; }
+    if (ch === '|') { flush(false); continue; }
+    cur += ch;
+  }
+  flush(true);
+  return out;
+}
+
+/**
+ * Вывод .env/deploy.env в лог (мера 1 разбора инцидентов 23.11.2026, «да» Игоря t1768s8250).
+ * Отказ, если печатающая команда (cat/sed/grep/head…) читает env-файл, а ни она, ни следующие стадии
+ * конвейера не маскируют значения. Разрешено: `set -a; . файл`, `grep -c|-q|-l`, `cut -d= -f1`, sed с маской `=***`, `| wc`.
+ * @param {string} command - текст bash-команды.
+ * @returns {boolean} отказать ли.
+ */
+export function checkEnvDump(command) {
+  if (typeof command !== 'string' || !ENV_FILE.test(command)) return false;
+  for (const stages of pipelines(command)) {
+    for (let i = 0; i < stages.length; i += 1) {
+      const stage = stages[i].trim().replace(/^(?:sudo(?:\s+-\S+)*(?:\s+-u\s+\S+)?\s+|env\s+(?:\S+=\S*\s+)*|time\s+)+/, '');
+      const tool = (shellWords(stage)[0] ?? '').replace(/^.*\//, '');
+      if (!PRINTERS.has(tool) || !ENV_FILE.test(stage)) continue;
+      if (stages.slice(i).some(masksValues)) continue;
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Слова выката рядом с `+wip`. */
@@ -344,7 +417,7 @@ export async function evaluate(exec, config, deps) {
 export function denialText(hit) {
   const info = RULE_INFO[hit.rule] ?? { skill: 'ready-gate', misses: '—' };
   const advice = {
-    secrets: 'Пароли, DSN и токены — только из env-файла (`set -a; . <файл>; set +a`, PGPASSFILE), без вывода значения.',
+    secrets: 'Пароли, DSN и токены — только из env-файла (`set -a; . <файл>; set +a`), к БД — `psql service=<имя>` (~/.pg_service.conf). .env/deploy.env не выводить: только ключ с маской — `grep -c \'^KEY=\' <файл>` или `sed -n \'s/^\\(KEY\\)=.*/\\1=***/p\' <файл>`.',
     wip: 'Выкатывай только закоммиченный SHA: закоммить в своей ветке и `dev-stand.sh deploy --lane <лейн> --ref <sha>` или чистый worktree.',
     rootWrite: 'Корень репо и main/master — только чтение. Работай в своём worktree: `git worktree add .local/worktrees/<лейн> -b <ветка> origin/master` (или `dev-stand.sh worktree <лейн>`).',
     loop: 'Ты повторяешь один и тот же вызов. Смени подход: прочитай вывод, проверь гипотезу другой командой или опиши блокер руководителю.',
