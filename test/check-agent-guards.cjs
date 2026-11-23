@@ -42,6 +42,21 @@ function sh(cwd, ...args) {
     assert.equal(g.checkSecrets('set -a; . /etc/x.env; set +a; psql "$DSN"'), null);
     assert.equal(g.checkSecrets('git status'), null);
   });
+  await test('secrets: вывод .env без маски — отказ, маска и source — нет', () => {
+    for (const c of ['cat .env', 'cat /home/goxa/project/unico/.local/dev-stand/deploy.env', 'sudo cat /etc/unico.env',
+      "grep DATABASE_URL deploy.env", "sed -n '1,20p' .env.local", 'head -5 .env | sort', 'tail /etc/unico-dev/dev2.env',
+      'cd x && grep -E "^(STAND|UNICO)_" .local/dev-stand/deploy.env']) {
+      assert.equal(g.checkSecrets(c), 'вывод .env-файла', c);
+      assert.equal(g.checkEnvDump(c), true, c);
+    }
+    for (const c of ['set -a; . /etc/unico.env; set +a; psql service=unico_staging', "grep -c '^STAND_TOKEN=' deploy.env",
+      "sed -n 's/^\\(STAND_TOKEN\\)=.*/\\1=***/p' deploy.env", 'cut -d= -f1 .env', "grep -q '^X=' .env && echo yes",
+      "grep STAND deploy.env | sed 's/=.*/=***/'", 'grep -E "^[A-Z_]+=" deploy.env | cut -d= -f1', 'ls -la .env', 'cp .env.example .env',
+      'cat README.md', 'grep -rn environment src/', 'cat package.json | grep env', 'wc -l deploy.env']) {
+      assert.equal(g.checkSecrets(c), null, c);
+    }
+  });
+
   await test('wip: «+wip» в выкате — отказ, в grep — нет', () => {
     assert.equal(g.checkWipCommand('ops/deploy/dev-stand.sh deploy --lane a # 3bbddb0+wip'), true);
     assert.equal(g.checkWipCommand('grep -c "+wip" sessions.jsonl'), false);
